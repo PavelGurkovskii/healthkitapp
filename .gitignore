@@ -1,0 +1,13 @@
+.DS_Store
+.backend.log
+.ngrok.log
+.ngrok_tunnels.json
+backend/node_modules/
+backend/data/*.jsonl
+backend/data/seen_chunks.json
+backend/data/seen_samples.txt
+backend/data/seen_periods.txt
+ios/DerivedData/
+ios/.DS_Store
+ios/**/*.xcuserstate
+ios/**/*.xcuserdata/
