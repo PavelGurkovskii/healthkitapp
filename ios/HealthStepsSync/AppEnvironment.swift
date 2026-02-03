@@ -2,15 +2,17 @@ import Foundation
 import Combine
 import HealthKit
 
+/// Root dependency container for the app.
 final class AppEnvironment: ObservableObject {
   private let healthStore: HKHealthStore
-  private let stepsProvider: HealthStepsProvider
-  private let outbox: FileOutboxStore
-  private let api: APIClient
-  private let uploadManager: UploadManager
-  private let networkMonitor: NetworkMonitor
+  private let stepsProvider: any StepsProviding
+  private let outbox: any OutboxStoring
+  private let api: any StepsAPIClient
+  private let uploadManager: any UploadManaging
+  private let networkMonitor: any NetworkMonitoring
   private let backgroundCoordinator: BackgroundSyncCoordinator
 
+  /// Loads Backend base URL from Info.plist.
   private static func loadBackendBaseURL() -> URL {
     if let raw = Bundle.main.object(forInfoDictionaryKey: "BackendBaseURL") as? String,
        let url = URL(string: raw) {
@@ -19,6 +21,7 @@ final class AppEnvironment: ObservableObject {
     return URL(string: "http://localhost:3000")!
   }
 
+  /// Loads max upload chunk size from Info.plist.
   private static func loadUploadChunkSize() -> Int {
     if let raw = Bundle.main.object(forInfoDictionaryKey: "UploadChunkSize") as? NSNumber {
       let v = raw.intValue
@@ -57,6 +60,7 @@ final class AppEnvironment: ObservableObject {
   }
 
   @MainActor
+  /// Creates a view model for the root UI.
   func makeViewModel() -> SyncViewModel {
     SyncViewModel(stepsProvider: stepsProvider, networkMonitor: networkMonitor, uploadManager: uploadManager)
   }

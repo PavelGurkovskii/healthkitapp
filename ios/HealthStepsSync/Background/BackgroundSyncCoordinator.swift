@@ -1,14 +1,17 @@
 import Foundation
 import BackgroundTasks
 
+/// Coordinates background processing tasks with the upload manager.
 final class BackgroundSyncCoordinator {
-  private let uploadManager: UploadManager
+  private let uploadManager: any UploadManaging
   private var currentWork: Task<Void, Never>?
 
-  init(uploadManager: UploadManager) {
+  /// Creates a coordinator that uses the given upload manager.
+  init(uploadManager: any UploadManaging) {
     self.uploadManager = uploadManager
   }
 
+  /// Handles a BGProcessingTask by attempting to make forward progress on syncing.
   func handleProcessingTask(_ task: BGProcessingTask) {
     task.expirationHandler = {
       self.currentWork?.cancel()

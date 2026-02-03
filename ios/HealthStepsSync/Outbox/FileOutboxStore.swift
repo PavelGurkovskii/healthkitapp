@@ -1,6 +1,30 @@
 import Foundation
 
-final class FileOutboxStore {
+/// Protocol defining the interface for an outbox used to persist upload chunks.
+protocol OutboxStoring: AnyObject {
+  /// Returns the number of queued chunks (pending + uploading).
+  func queuedChunksCount() throws -> Int
+
+  /// Returns the earliest `startDate` among queued chunks.
+  func earliestQueuedSampleStartDate() throws -> Date?
+
+  /// Enqueues a new chunk built from already-sorted samples.
+  func enqueueChunk(samples: [StepSampleDTO]) throws -> OutboxChunk
+
+  /// Claims the next pending chunk and moves it to the uploading state.
+  func claimNextPendingChunk() throws -> OutboxChunk?
+
+  /// Marks a chunk as uploaded (removes it from uploading).
+  func markUploaded(chunk: OutboxChunk) throws
+
+  /// Marks a chunk upload attempt as failed and returns it back to pending.
+  func markFailedAndReturnToPending(chunk: OutboxChunk) throws
+
+  /// Clears all outbox state.
+  func reset() throws
+}
+
+final class FileOutboxStore: OutboxStoring {
   enum StoreError: Error {
     case failedToCreateDirectories
     case failedToMoveChunk
@@ -29,12 +53,16 @@ final class FileOutboxStore {
     try recoverUploadingToPending()
   }
 
+  /// Returns the total number of chunks currently queued for upload.
   func queuedChunksCount() throws -> Int {
     let pending = try fileManager.contentsOfDirectory(at: pendingURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]).count
     let uploading = try fileManager.contentsOfDirectory(at: uploadingURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]).count
     return pending + uploading
   }
 
+  /// Returns the earliest sample start date among all queued chunks.
+  ///
+  /// Note: samples inside a chunk are expected to be sorted by `startDate`, so we only inspect the first sample.
   func earliestQueuedSampleStartDate() throws -> Date? {
     let urls = try allQueuedChunkURLs()
     var earliest: Date?
@@ -95,6 +123,7 @@ final class FileOutboxStore {
     }
   }
 
+  /// Enqueues a new chunk into the pending queue.
   func enqueueChunk(samples: [StepSampleDTO]) throws -> OutboxChunk {
     let chunk = OutboxChunk(
       chunkId: UUID().uuidString,
@@ -108,6 +137,7 @@ final class FileOutboxStore {
     return chunk
   }
 
+  /// Moves the oldest pending chunk to uploading and returns it.
   func claimNextPendingChunk() throws -> OutboxChunk? {
     let urls = try fileManager.contentsOfDirectory(at: pendingURL, includingPropertiesForKeys: [.creationDateKey], options: [.skipsHiddenFiles])
 
@@ -131,6 +161,7 @@ final class FileOutboxStore {
     return chunk
   }
 
+  /// Removes a chunk from the uploading queue after successful upload.
   func markUploaded(chunk: OutboxChunk) throws {
     let url = uploadingURL.appendingPathComponent(filename(for: chunk), isDirectory: false)
     if fileManager.fileExists(atPath: url.path) {
@@ -138,6 +169,7 @@ final class FileOutboxStore {
     }
   }
 
+  /// Increments attempt count and moves the chunk back from uploading to pending.
   func markFailedAndReturnToPending(chunk: OutboxChunk) throws {
     var updated = chunk
     updated.attemptCount += 1
@@ -154,6 +186,7 @@ final class FileOutboxStore {
     }
   }
 
+  /// Clears pending and uploading directories and recreates them.
   func reset() throws {
     if fileManager.fileExists(atPath: pendingURL.path) {
       try? fileManager.removeItem(at: pendingURL)

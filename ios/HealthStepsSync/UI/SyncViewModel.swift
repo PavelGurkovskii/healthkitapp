@@ -19,9 +19,9 @@ final class SyncViewModel: ObservableObject {
   @Published var logs: [String] = []
   @Published private(set) var controlState: ControlState = .idle
 
-  private let stepsProvider: HealthStepsProvider
-  private let networkMonitor: NetworkMonitor
-  private let uploadManager: UploadManager
+  private let stepsProvider: any StepsProviding
+  private let networkMonitor: any NetworkMonitoring
+  private let uploadManager: any UploadManaging
 
   private let defaults: UserDefaults
   private let pausedKey = "HealthStepsSync.userPaused"
@@ -31,7 +31,13 @@ final class SyncViewModel: ObservableObject {
   private var hasNewData: Bool = false
   private var userPaused: Bool = false
 
-  init(stepsProvider: HealthStepsProvider, networkMonitor: NetworkMonitor, uploadManager: UploadManager, defaults: UserDefaults = .standard) {
+  /// Creates a view model that drives the sync UI.
+  init(
+    stepsProvider: any StepsProviding,
+    networkMonitor: any NetworkMonitoring,
+    uploadManager: any UploadManaging,
+    defaults: UserDefaults = .standard
+  ) {
     self.stepsProvider = stepsProvider
     self.networkMonitor = networkMonitor
     self.uploadManager = uploadManager
@@ -159,6 +165,7 @@ final class SyncViewModel: ObservableObject {
     }
   }
 
+  /// Resets UI state and clears all local sync state.
   func resetButtonTapped() {
     guard controlState == .success else { return }
 
@@ -262,6 +269,7 @@ final class SyncViewModel: ObservableObject {
     }
   }
 
+  /// Entry point used by the app to start syncing.
   func start() {
     startSync()
   }

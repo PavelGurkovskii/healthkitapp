@@ -1,7 +1,23 @@
 import Foundation
 import HealthKit
 
-final class HealthStepsProvider {
+/// Protocol defining the interface for a steps provider.
+protocol StepsProviding: AnyObject {
+  /// Requests HealthKit read access for step count.
+  func requestAuthorization() async throws
+  
+  /// Fetches the next batch of step samples using a persisted HK query anchor.
+  func fetchNextBatch(limit: Int) async throws -> [StepSampleDTO]
+  
+  /// Resets all stored anchors so the next sync starts from the beginning.
+  func resetAllAnchors()
+  
+  /// Starts a HealthKit observer query that notifies when new step samples appear.
+  func startObserver(onUpdate: @escaping () -> Void)
+}
+
+/// Provides step count data from HealthKit.
+final class HealthStepsProvider: StepsProviding {
   enum ProviderError: Error {
     case healthDataNotAvailable
     case authorizationFailed
@@ -19,6 +35,7 @@ final class HealthStepsProvider {
     self.anchorStore = anchorStore
   }
 
+  /// Requests HealthKit read access for step count.
   func requestAuthorization() async throws {
     guard HKHealthStore.isHealthDataAvailable() else {
       throw ProviderError.healthDataNotAvailable
@@ -39,6 +56,7 @@ final class HealthStepsProvider {
     }
   }
 
+  /// Fetches the next batch of step samples using a persisted HK query anchor.
   func fetchNextBatch(limit: Int) async throws -> [StepSampleDTO] {
     guard let type = HKObjectType.quantityType(forIdentifier: .stepCount) else {
       throw ProviderError.healthDataNotAvailable
@@ -76,10 +94,12 @@ final class HealthStepsProvider {
     }
   }
 
+  /// Resets all stored anchors so the next sync starts from the beginning.
   func resetAllAnchors() {
     anchorStore.reset()
   }
 
+  /// Starts a HealthKit observer query that notifies when new step samples appear.
   func startObserver(onUpdate: @escaping () -> Void) {
     guard let type = HKObjectType.quantityType(forIdentifier: .stepCount) else {
       return

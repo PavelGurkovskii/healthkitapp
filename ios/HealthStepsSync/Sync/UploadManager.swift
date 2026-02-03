@@ -1,6 +1,27 @@
 import Foundation
 
-actor UploadManager {
+/// Protocol defining the interface of the sync/upload manager.
+protocol UploadManaging: Actor {
+  func makeLogStream() -> AsyncStream<String>
+  func makeProgressStream() -> AsyncStream<Double>
+
+  func resetProgressForNewRun() async
+  func notifyHealthDataChanged() async
+  func setNetworkReachable(_ reachable: Bool) async
+  func startOrResume() async
+
+  func pause() async
+  func resume() async
+
+  func isSyncComplete() async -> Bool
+  func hasPendingWork() async -> Bool
+  func isPausedFlag() async -> Bool
+
+  func stop() async
+  func resetSync() async
+}
+
+actor UploadManager: UploadManaging {
   enum State: Equatable {
     case idle
     case waitingForNetwork
@@ -29,9 +50,9 @@ actor UploadManager {
 
   private var isPaused: Bool = false
 
-  private let stepsProvider: HealthStepsProvider
-  private let outbox: FileOutboxStore
-  private let api: APIClient
+  private let stepsProvider: any StepsProviding
+  private let outbox: any OutboxStoring
+  private let api: any StepsAPIClient
 
   private var isNetworkReachable: Bool = true
   private var consecutiveUploadFailures: Int = 0
@@ -47,9 +68,9 @@ actor UploadManager {
   private let maxQueuedChunks: Int
 
   init(
-    stepsProvider: HealthStepsProvider,
-    outbox: FileOutboxStore,
-    api: APIClient,
+    stepsProvider: any StepsProviding,
+    outbox: any OutboxStoring,
+    api: any StepsAPIClient,
     chunkSize: Int = 1000,
     maxQueuedChunks: Int = 2
   ) {
@@ -60,6 +81,7 @@ actor UploadManager {
     self.maxQueuedChunks = maxQueuedChunks
   }
 
+  /// Creates a stream of log lines describing sync activity.
   func makeLogStream() -> AsyncStream<String> {
     AsyncStream { continuation in
       let id = UUID()
@@ -118,6 +140,7 @@ actor UploadManager {
     return earliest
   }
 
+  /// Creates a stream of progress updates in the range [0...1].
   func makeProgressStream() -> AsyncStream<Double> {
     AsyncStream { continuation in
       let id = UUID()
@@ -128,6 +151,7 @@ actor UploadManager {
     }
   }
 
+  /// Resets progress state for a new sync run.
   func resetProgressForNewRun() async {
     lastProgress = 0
     progressRangeStartDate = nil
@@ -137,6 +161,7 @@ actor UploadManager {
     emitProgress(0)
   }
 
+  /// Notifies the manager that new HealthKit data may be available.
   func notifyHealthDataChanged() async {
     log("Health data changed")
     reachedEndOfHealthData = false
@@ -144,6 +169,7 @@ actor UploadManager {
     wakeAll()
   }
 
+  /// Updates reachability and wakes workers.
   func setNetworkReachable(_ reachable: Bool) async {
     isNetworkReachable = reachable
     if reachable {
@@ -160,6 +186,7 @@ actor UploadManager {
     }
   }
 
+  /// Starts the sync pipeline or resumes it if it was paused.
   func startOrResume() async {
     guard state != .stopped else { return }
 
@@ -201,6 +228,7 @@ actor UploadManager {
     await task.value
   }
 
+  /// Pauses the sync pipeline.
   func pause() async {
     guard state != .stopped else { return }
     isPaused = true
@@ -209,6 +237,7 @@ actor UploadManager {
     wakeAll()
   }
 
+  /// Resumes the sync pipeline.
   func resume() async {
     guard state != .stopped else { return }
     isPaused = false
@@ -233,6 +262,7 @@ actor UploadManager {
     isPaused
   }
 
+  /// Stops the sync pipeline.
   func stop() async {
     state = .stopped
     log("Stopped")
@@ -240,6 +270,7 @@ actor UploadManager {
     wakeAll()
   }
 
+  /// Resets all sync state and clears the outbox.
   func resetSync() async {
     let task = syncRunTask
     task?.cancel()
