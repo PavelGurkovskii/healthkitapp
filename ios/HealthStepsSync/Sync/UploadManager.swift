@@ -59,6 +59,11 @@ actor UploadManager: UploadManaging {
 
   private var reachedEndOfHealthData: Bool = false
   private var didLogNoWorkIdle: Bool = false
+  private var didLogUploadConfig: Bool = false
+
+  private var activeUploads: Int = 0
+  private var isPingLoopRunning: Bool = false
+  private var isUploadBackoffRunning: Bool = false
 
   private var syncRunTask: Task<Void, Never>?
 
@@ -66,19 +71,22 @@ actor UploadManager: UploadManaging {
 
   private let chunkSize: Int
   private let maxQueuedChunks: Int
+  private let maxConcurrentUploads: Int
 
   init(
     stepsProvider: any StepsProviding,
     outbox: any OutboxStoring,
     api: any StepsAPIClient,
     chunkSize: Int = 1000,
-    maxQueuedChunks: Int = 2
+    maxQueuedChunks: Int = 5,
+    maxConcurrentUploads: Int = 5
   ) {
     self.stepsProvider = stepsProvider
     self.outbox = outbox
     self.api = api
     self.chunkSize = chunkSize
     self.maxQueuedChunks = maxQueuedChunks
+    self.maxConcurrentUploads = max(1, min(maxConcurrentUploads, 5))
   }
 
   /// Creates a stream of log lines describing sync activity.
@@ -378,10 +386,19 @@ actor UploadManager: UploadManaging {
   }
 
   private func uploadWorker() async {
-    var didLogUploadConfig = false
-
     emitDateRangeProgressIfPossible()
 
+    await withTaskGroup(of: Void.self) { group in
+      for _ in 0..<maxConcurrentUploads {
+        group.addTask {
+          await self.uploadWorkerLoop()
+        }
+      }
+      await group.waitForAll()
+    }
+  }
+
+  private func uploadWorkerLoop() async {
     while true {
       if state == .stopped {
         return
@@ -405,17 +422,26 @@ actor UploadManager: UploadManaging {
         return
       }
 
-      guard let chunk = (try? outbox.claimNextPendingChunk()) else {
+      if state == .pinging || state == .backingOff {
+        await waitForWakeOrTimeout(0.25)
+        continue
+      }
+
+      let claimed = (try? outbox.claimNextPendingChunk()) ?? nil
+      guard let chunk = claimed else {
         let queued = (try? outbox.queuedChunksCount()) ?? 0
         if queued == 0, reachedEndOfHealthData {
           return
         }
 
-        state = .idle
-        if !didLogNoWorkIdle {
-          didLogNoWorkIdle = true
-          log("No queued chunks; waiting for new data")
+        if activeUploads == 0 {
+          state = .idle
+          if !didLogNoWorkIdle {
+            didLogNoWorkIdle = true
+            log("No queued chunks; waiting for new data")
+          }
         }
+
         await waitForWakeOrTimeout(1)
         continue
       }
@@ -425,70 +451,105 @@ actor UploadManager: UploadManaging {
       if !didLogUploadConfig {
         didLogUploadConfig = true
         log("Uploading")
-        log("Upload config: chunkSize=\(chunkSize)")
+        log("Upload config: chunkSize=\(chunkSize), concurrentUploads=\(maxConcurrentUploads)")
       }
 
-      let filteredSamples = chunk.samples.filter { $0.count > 0 }
-      if filteredSamples.isEmpty {
-        do {
-          try outbox.markUploaded(chunk: chunk)
-          consecutiveUploadFailures = 0
-          wakeAll()
+      await uploadOneChunk(chunk)
+    }
+  }
 
-          isEarliestQueuedSampleStartDateDirty = true
+  private func uploadOneChunk(_ chunk: OutboxChunk) async {
+    activeUploads += 1
+    defer {
+      activeUploads -= 1
+      wakeAll()
+    }
 
-          emitDateRangeProgressIfPossible()
-        } catch {
-          log("Failed to drop empty chunk \(chunk.chunkId): \(String(describing: error))")
-        }
-        continue
-      }
-
+    let filteredSamples = chunk.samples.filter { $0.count > 0 }
+    if filteredSamples.isEmpty {
       do {
-        let filteredChunk = OutboxChunk(
-          chunkId: chunk.chunkId,
-          createdAt: chunk.createdAt,
-          attemptCount: chunk.attemptCount,
-          samples: filteredSamples
-        )
-        log("Uploading chunk \(chunk.chunkId) (samples: \(filteredSamples.count))")
-        let resp = try await api.upload(chunk: filteredChunk)
         try outbox.markUploaded(chunk: chunk)
         consecutiveUploadFailures = 0
-        wakeAll()
 
         isEarliestQueuedSampleStartDateDirty = true
-
         emitDateRangeProgressIfPossible()
-
-        let received = resp.receivedSamples ?? filteredSamples.count
-        let written = resp.written ?? -1
-        let skipped = resp.skippedSeenSamples ?? -1
-        let took = resp.tookMs ?? -1
-        let duplicate = resp.duplicate ?? false
-        log("Uploaded chunk \(chunk.chunkId) (received: \(received), written: \(written), skipped: \(skipped), duplicate: \(duplicate), tookMs: \(took))")
       } catch {
-        do {
-          try outbox.markFailedAndReturnToPending(chunk: chunk)
-          isEarliestQueuedSampleStartDateDirty = true
-        } catch {
-          log("Failed to requeue chunk \(chunk.chunkId): \(String(describing: error))")
-        }
-        wakeAll()
+        log("Failed to drop empty chunk \(chunk.chunkId): \(String(describing: error))")
+      }
+      return
+    }
 
-        consecutiveUploadFailures += 1
-        log("Failed to upload chunk \(chunk.chunkId): \(String(describing: error))")
+    do {
+      let filteredChunk = OutboxChunk(
+        chunkId: chunk.chunkId,
+        createdAt: chunk.createdAt,
+        attemptCount: chunk.attemptCount,
+        samples: filteredSamples
+      )
+      log("Uploading chunk \(chunk.chunkId) (samples: \(filteredSamples.count))")
+      let resp = try await api.upload(chunk: filteredChunk)
+      try outbox.markUploaded(chunk: chunk)
+      consecutiveUploadFailures = 0
 
-        if consecutiveUploadFailures >= 3 {
-          await pingUntilReachable()
-        } else {
-          state = .backingOff
-          let delay = computeUploadBackoffSeconds()
-          log("Backing off \(delay)s (upload)")
-          await waitForWakeOrTimeout(delay)
-        }
+      isEarliestQueuedSampleStartDateDirty = true
+      emitDateRangeProgressIfPossible()
+
+      let received = resp.receivedSamples ?? filteredSamples.count
+      let written = resp.written ?? -1
+      let skipped = resp.skippedSeenSamples ?? -1
+      let took = resp.tookMs ?? -1
+      let duplicate = resp.duplicate ?? false
+      log("Uploaded chunk \(chunk.chunkId) (received: \(received), written: \(written), skipped: \(skipped), duplicate: \(duplicate), tookMs: \(took))")
+    } catch {
+      do {
+        try outbox.markFailedAndReturnToPending(chunk: chunk)
+        isEarliestQueuedSampleStartDateDirty = true
+      } catch {
+        log("Failed to requeue chunk \(chunk.chunkId): \(String(describing: error))")
+      }
+
+      consecutiveUploadFailures += 1
+      log("Failed to upload chunk \(chunk.chunkId): \(String(describing: error))")
+
+      if consecutiveUploadFailures >= 3 {
+        await pingUntilReachableOnce()
+      } else {
+        await backoffThenContinueUploadOnce()
       }
     }
+  }
+
+  private func pingUntilReachableOnce() async {
+    if isPingLoopRunning {
+      await waitForWakeOrTimeout(0.5)
+      return
+    }
+
+    isPingLoopRunning = true
+    defer {
+      isPingLoopRunning = false
+      wakeAll()
+    }
+
+    await pingUntilReachable()
+  }
+
+  private func backoffThenContinueUploadOnce() async {
+    if isUploadBackoffRunning {
+      await waitForWakeOrTimeout(0.5)
+      return
+    }
+
+    isUploadBackoffRunning = true
+    defer {
+      isUploadBackoffRunning = false
+      wakeAll()
+    }
+
+    state = .backingOff
+    let delay = computeUploadBackoffSeconds()
+    log("Backing off \(delay)s (upload)")
+    await waitForWakeOrTimeout(delay)
   }
 
   private func pingUntilReachable() async {

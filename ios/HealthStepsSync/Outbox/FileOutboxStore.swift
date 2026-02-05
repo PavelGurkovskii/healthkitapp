@@ -34,12 +34,16 @@ final class FileOutboxStore: OutboxStoring {
 
   private let fileManager: FileManager
   private let rootURL: URL
+  private let pendingURL: URL
+  private let uploadingURL: URL
 
-  private var pendingURL: URL { rootURL.appendingPathComponent("pending", isDirectory: true) }
-  private var uploadingURL: URL { rootURL.appendingPathComponent("uploading", isDirectory: true) }
+  private let encoder: JSONEncoder
+  private let decoder: JSONDecoder
 
   init(fileManager: FileManager = .default) throws {
     self.fileManager = fileManager
+    self.encoder = JSONEncoder()
+    self.decoder = JSONDecoder()
 
     let base = try fileManager.url(
       for: .applicationSupportDirectory,
@@ -49,6 +53,8 @@ final class FileOutboxStore: OutboxStoring {
     )
 
     self.rootURL = base.appendingPathComponent("Outbox", isDirectory: true)
+    self.pendingURL = rootURL.appendingPathComponent("pending", isDirectory: true)
+    self.uploadingURL = rootURL.appendingPathComponent("uploading", isDirectory: true)
     try ensureDirectories()
     try recoverUploadingToPending()
   }
@@ -202,7 +208,7 @@ final class FileOutboxStore: OutboxStoring {
   }
 
   private func write(chunk: OutboxChunk, to url: URL) throws {
-    let data = try JSONEncoder().encode(chunk)
+    let data = try encoder.encode(chunk)
     let tmp = url.appendingPathExtension("tmp")
     try data.write(to: tmp, options: [.atomic])
     if fileManager.fileExists(atPath: url.path) {
@@ -213,7 +219,6 @@ final class FileOutboxStore: OutboxStoring {
 
   private func readChunk(at url: URL) throws -> OutboxChunk {
     let data = try Data(contentsOf: url)
-    let decoded = try JSONDecoder().decode(OutboxChunk.self, from: data)
-    return decoded
+    return try decoder.decode(OutboxChunk.self, from: data)
   }
 }
